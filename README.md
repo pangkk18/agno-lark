@@ -42,6 +42,27 @@ uv sync
 cp .env.example .env
 ```
 
+After the first PyPI release, install the published package in an existing project with either:
+
+```bash
+uv add agno-lark
+# or
+python -m pip install agno-lark
+```
+
+The distribution name uses a hyphen (`agno-lark`), while Python imports use an underscore:
+
+```python
+from agno_lark import LarkInterface, build_remote_target, load_settings
+```
+
+The package also installs the `agno-lark` command. After installation, run the bridge with:
+
+```bash
+agno-lark --help
+agno-lark
+```
+
 ## Create the Lark/Feishu application
 
 Create an enterprise application in the Lark or Feishu Open Platform and enable bot capabilities. Record the App ID (`cli_...`) and App Secret. Select the long connection (WebSocket) mode in event subscriptions and subscribe to message events. Grant the permissions required to receive and send messages, read image/file resources, and send card messages. Publish the application and add the bot to the target chats.
@@ -147,6 +168,36 @@ uv run agno-lark --help
 ```
 
 Tests use fake Channel and Agno targets plus `httpx` mocks; they do not contact Lark/Feishu or AgentOS. See [`examples/agent_os_remote.py`](examples/agent_os_remote.py) for the remote integration example.
+
+## Release and publish
+
+The package will be published to [PyPI](https://pypi.org/project/agno-lark/) as `agno-lark`. Every release version must be unique. Update `version` in `pyproject.toml`, then run the local checks and build:
+
+```bash
+uv lock
+uv sync --locked
+uv run pytest
+uv run ruff check .
+uv run mypy src
+uv build
+```
+
+For a first release or a manual release, create a PyPI API token and publish without putting the token in the repository or shell history:
+
+```bash
+export UV_PUBLISH_TOKEN='pypi-...'
+uv publish
+```
+
+To verify a release on TestPyPI first, use a TestPyPI token and the TestPyPI upload endpoint:
+
+```bash
+export UV_PUBLISH_TOKEN='pypi-...'
+uv publish --publish-url https://test.pypi.org/legacy/
+uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ agno-lark
+```
+
+This repository also includes a GitHub Actions workflow for PyPI Trusted Publishing. Configure the GitHub repository as a trusted publisher for the `agno-lark` project on PyPI, then push a tag such as `v0.1.0`; the workflow builds and publishes without a long-lived PyPI token.
 
 ## License
 

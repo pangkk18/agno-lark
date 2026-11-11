@@ -42,6 +42,27 @@ uv sync
 cp .env.example .env
 ```
 
+发布到 PyPI 后，在已有项目中安装：
+
+```bash
+uv add agno-lark
+# 或
+python -m pip install agno-lark
+```
+
+分发包名使用连字符 `agno-lark`，Python 导入名使用下划线 `agno_lark`：
+
+```python
+from agno_lark import LarkInterface, build_remote_target, load_settings
+```
+
+安装后会同时提供 `agno-lark` 命令：
+
+```bash
+agno-lark --help
+agno-lark
+```
+
 ## 配置 Lark/Feishu 应用
 
 在 Lark/Feishu 开放平台创建企业自建应用并启用机器人能力，记录 App ID（`cli_...`）和 App Secret；在事件订阅中选择长连接（WebSocket）并订阅接收消息事件；开通消息收发、读取消息资源和发送卡片消息所需权限；发布应用并把机器人加入目标群聊。官方 Channel SDK 负责 WebSocket、事件标准化、资源下载、去重和卡片回调，不需要额外实现回调 Webhook。
@@ -139,6 +160,36 @@ uv run agno-lark --help
 ```
 
 测试使用 fake Channel、fake Agno target 和 `httpx` mock，不访问真实服务。远程接入示例见 [`examples/agent_os_remote.py`](examples/agent_os_remote.py)。
+
+## 发布到 PyPI
+
+项目计划以 `agno-lark` 发布到 PyPI，每个版本号只能发布一次。修改 `pyproject.toml` 中的 `version` 后，先执行完整检查和构建：
+
+```bash
+uv lock
+uv sync --locked
+uv run pytest
+uv run ruff check .
+uv run mypy src
+uv build
+```
+
+手动发布时，在 PyPI 创建 API Token，并通过环境变量传给 uv，不要把 Token 写入仓库或命令历史：
+
+```bash
+export UV_PUBLISH_TOKEN='pypi-...'
+uv publish
+```
+
+正式发布前可以先上传到 TestPyPI：
+
+```bash
+export UV_PUBLISH_TOKEN='pypi-...'
+uv publish --publish-url https://test.pypi.org/legacy/
+uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ agno-lark
+```
+
+仓库还提供 GitHub Actions Trusted Publishing 工作流。在 PyPI 为 `agno-lark` 配置 GitHub 仓库可信发布者后，推送 `v0.1.0` 这类 tag 即可自动构建并发布，无需长期 PyPI Token。
 
 ## 许可证
 
