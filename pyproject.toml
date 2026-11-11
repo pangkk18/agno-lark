@@ -1,6 +1,6 @@
 [project]
 name = "agno-lark"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight Python bridge between Lark/Feishu and Agno AgentOS."
 readme = "README.md"
 authors = [

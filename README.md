@@ -175,6 +175,7 @@ The package will be published to [PyPI](https://pypi.org/project/agno-lark/) as 
 
 ```bash
 uv lock
+uv lock --check
 uv sync --locked
 uv run pytest
 uv run ruff check .
@@ -198,6 +199,24 @@ uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https
 ```
 
 This repository also includes a GitHub Actions workflow for PyPI Trusted Publishing. Configure the GitHub repository as a trusted publisher for the `agno-lark` project on PyPI, then push a tag such as `v0.1.0`; the workflow builds and publishes without a long-lived PyPI token.
+
+Commit both `pyproject.toml` and `uv.lock` after every version change, even when dependencies have not changed. The lockfile includes the project's own version. `uv version 0.1.2` updates the project version and re-locks it; if you edit the version manually, run `uv lock` before committing.
+
+Create the release tag only after committing those files. If a tag's workflow fails because its lockfile is stale, rerunning that workflow still checks out the same tagged commit. Fix the files and publish a new version and tag, for example:
+
+```bash
+uv version 0.1.2
+uv lock --check
+uv sync --locked
+uv run --locked pytest
+uv run --locked ruff check .
+uv run --locked mypy src
+git add pyproject.toml uv.lock README.md READM_ZH.md
+git commit -m "release: v0.1.2"
+git tag v0.1.2
+git push origin main
+git push origin v0.1.2
+```
 
 ## License
 

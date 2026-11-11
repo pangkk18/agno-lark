@@ -167,6 +167,7 @@ uv run agno-lark --help
 
 ```bash
 uv lock
+uv lock --check
 uv sync --locked
 uv run pytest
 uv run ruff check .
@@ -190,6 +191,24 @@ uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https
 ```
 
 仓库还提供 GitHub Actions Trusted Publishing 工作流。在 PyPI 为 `agno-lark` 配置 GitHub 仓库可信发布者后，推送 `v0.1.0` 这类 tag 即可自动构建并发布，无需长期 PyPI Token。
+
+每次修改版本号后，都要一起提交 `pyproject.toml` 和 `uv.lock`，即使没有修改依赖。锁文件也记录项目自身的版本。可以用 `uv version 0.1.2` 同时修改版本并更新锁文件；手动编辑版本号后，则必须先运行 `uv lock` 再提交。
+
+先提交这两个文件，再创建发布标签。如果某个标签的工作流因锁文件过期而失败，直接重跑仍会检出同一个旧提交。修复后使用新版本和新标签发布，例如：
+
+```bash
+uv version 0.1.2
+uv lock --check
+uv sync --locked
+uv run --locked pytest
+uv run --locked ruff check .
+uv run --locked mypy src
+git add pyproject.toml uv.lock README.md READM_ZH.md
+git commit -m "release: v0.1.2"
+git tag v0.1.2
+git push origin main
+git push origin v0.1.2
+```
 
 ## 许可证
 
