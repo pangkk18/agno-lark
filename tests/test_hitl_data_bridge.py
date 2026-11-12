@@ -12,9 +12,27 @@ from agno_lark.bridge import LarkBridge
 class Channel:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        self.streams: list[dict] = []
 
     async def send(self, _to: str, envelope: dict) -> None:
         self.sent.append(envelope)
+
+    async def stream(self, to: str, spec: dict) -> None:
+        updates: list[dict] = []
+
+        class Controller:
+            async def update(self, card: dict) -> None:
+                updates.append(card)
+
+        producer = spec["card"]["producer"]
+        await producer(Controller())
+        self.streams.append(
+            {
+                "to": to,
+                "initial": spec["card"]["initial"],
+                "updates": updates,
+            }
+        )
 
 
 class DataClient:
@@ -53,7 +71,9 @@ class Target:
         self.confirmed = requirements[0].confirmation is True
 
         async def events():
-            yield SimpleNamespace(event="RunCompleted", content="done")
+            yield SimpleNamespace(event="RunContent", content="first")
+            yield SimpleNamespace(event="RunContent", content="first second")
+            yield SimpleNamespace(event="RunCompleted", content="first second")
 
         return events()
 
@@ -91,7 +111,15 @@ async def test_hitl_approve_continues_original_requester() -> None:
     )
     target = Target()
     store = HitlStore(requirement.to_dict())
-    bridge = LarkBridge(target=target, settings=settings(), store=store, channel=Channel())
+    channel = Channel()
+    bridge = LarkBridge(target=target, settings=settings(), store=store, channel=channel)
     await bridge.handle_command("/approve", message(), "scope", "session")
     assert target.confirmed is True
     assert store.updated is True
+    assert channel.sent == []
+    assert len(channel.streams) == 1
+    updates = channel.streams[0]["updates"]
+    assert len(updates) == 4
+    assert "状态：运行中" in updates[0]["body"]["elements"][0]["content"]
+    assert "first second" in updates[1]["body"]["elements"][0]["content"]
+    assert "状态：已完成" in updates[-1]["body"]["elements"][0]["content"]

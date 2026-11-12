@@ -460,88 +460,163 @@ class LarkBridge:
                 result = await result
             continuation_status = "completed"
             continuation_output = ""
-            if hasattr(result, "__aiter__"):
-                async for event in result:
-                    event_name = str(getattr(event, "event", "")).lower()
-                    if event_name in {"runerror", "error", "steperror"}:
-                        continuation_status = "failed"
-                    elif event_name in {"runcancelled", "cancelled"}:
-                        continuation_status = "cancelled"
-                    if event_name in {"runpaused", "paused", "workflowpaused", "steppaused"}:
-                        continuation_status = "paused"
-                        next_requirements = getattr(event, "requirements", None) or getattr(
-                            event, "step_requirements", None
-                        ) or []
-                        for next_requirement in next_requirements:
-                            if hasattr(self.store, "save_hitl_requirement"):
-                                await self.store.save_hitl_requirement(
-                                    next_requirement,
-                                    run_id=row["run_id"],
-                                    scope_key=scope,
-                                    requirement_kind=(
-                                        "workflow"
-                                        if "step" in event_name or "workflow" in event_name
-                                        else "agent"
-                                    ),
-                                    requester_user_id=requester,
-                                    chat_id=row.get("chat_id"),
-                                    thread_id=row.get("thread_id"),
-                                    session_id=continuation_session,
-                                    target_type=getattr(self.settings, "target_type", "agent"),
-                                    target_id=getattr(self.settings, "target_id", ""),
-                                )
-                        self.pending_hitl += len(next_requirements)
-                    content = getattr(event, "content", None)
-                    if content:
-                        content = str(content)
-                        if continuation_output and content.startswith(continuation_output):
-                            continuation_output = content
-                        else:
-                            continuation_output += content
-                        await self._send(
-                            msg,
+            next_requirement_ids: list[str] = []
+
+            async def process_event(event: Any, update: Any | None = None) -> None:
+                """Accumulate continuation output and optionally patch one card."""
+
+                nonlocal continuation_status, continuation_output
+                event_name = str(getattr(event, "event", "")).lower()
+                if event_name in {"runerror", "error", "steperror"}:
+                    continuation_status = "failed"
+                elif event_name in {"runcancelled", "cancelled"}:
+                    continuation_status = "cancelled"
+                if event_name in {"runpaused", "paused", "workflowpaused", "steppaused"}:
+                    continuation_status = "paused"
+                    next_requirements = getattr(event, "requirements", None) or getattr(
+                        event, "step_requirements", None
+                    ) or []
+                    for next_requirement in next_requirements:
+                        requirement_payload = (
+                            next_requirement.to_dict()
+                            if hasattr(next_requirement, "to_dict")
+                            else {}
+                        )
+                        next_requirement_ids.append(
+                            str(
+                                getattr(next_requirement, "id", None)
+                                or requirement_payload.get("id")
+                                or requirement_payload.get("step_id")
+                                or ""
+                            )
+                        )
+                        if hasattr(self.store, "save_hitl_requirement"):
+                            await self.store.save_hitl_requirement(
+                                next_requirement,
+                                run_id=row["run_id"],
+                                scope_key=scope,
+                                requirement_kind=(
+                                    "workflow"
+                                    if "step" in event_name or "workflow" in event_name
+                                    else "agent"
+                                ),
+                                requester_user_id=requester,
+                                chat_id=row.get("chat_id"),
+                                thread_id=row.get("thread_id"),
+                                session_id=continuation_session,
+                                target_type=getattr(self.settings, "target_type", "agent"),
+                                target_id=getattr(self.settings, "target_id", ""),
+                            )
+                    self.pending_hitl += len(next_requirements)
+                content = getattr(event, "content", None)
+                if content:
+                    content = str(content)
+                    if continuation_output and content.startswith(continuation_output):
+                        continuation_output = content
+                    else:
+                        continuation_output += content
+                    if update is not None:
+                        await update(
                             run_card(
                                 status="running",
                                 run_id=row["run_id"],
                                 output=continuation_output,
-                            ),
+                            )
                         )
-            if hasattr(self.store, "update_run_by_id"):
-                await self.store.update_run_by_id(
-                    scope, row["run_id"], status=continuation_status,
-                    finished_at=None if continuation_status == "paused" else time.time(),
+
+            async def consume(update: Any | None = None) -> None:
+                if hasattr(result, "__aiter__"):
+                    async for event in result:
+                        await process_event(event, update)
+                else:
+                    await process_event(result, update)
+
+            async def finish() -> dict[str, Any]:
+                """Persist the terminal state and return the final card snapshot."""
+
+                if hasattr(self.store, "update_run_by_id"):
+                    await self.store.update_run_by_id(
+                        scope,
+                        row["run_id"],
+                        status=continuation_status,
+                        finished_at=None if continuation_status == "paused" else time.time(),
+                    )
+                resolved_attr = getattr(requirement, "is_resolved", None)
+                resolved = (
+                    bool(resolved_attr())
+                    if callable(resolved_attr)
+                    else bool(resolved_attr if resolved_attr is not None else True)
                 )
-            resolved_attr = getattr(requirement, "is_resolved", None)
-            resolved = (
-                bool(resolved_attr())
-                if callable(resolved_attr)
-                else bool(resolved_attr if resolved_attr is not None else True)
-            )
-            if hasattr(self.store, "update_hitl_requirement") and resolved:
-                self.pending_hitl = max(0, self.pending_hitl - 1)
-                await self.store.update_hitl_requirement(
-                    scope,
-                    row["run_id"],
-                    row["requirement_id"],
-                    status="resolved",
-                    payload=requirement.to_dict(),
-                )
-            await self._send(
-                msg,
-                run_card(
-                    status="running" if continuation_status == "completed" else continuation_status,
+                if hasattr(self.store, "update_hitl_requirement") and resolved:
+                    self.pending_hitl = max(0, self.pending_hitl - 1)
+                    await self.store.update_hitl_requirement(
+                        scope,
+                        row["run_id"],
+                        row["requirement_id"],
+                        status="resolved",
+                        payload=requirement.to_dict(),
+                        resolved_by_user_id=actor,
+                    )
+                output = continuation_output or {
+                    "completed": "继续执行完成",
+                    "paused": "运行已暂停，请继续处理",
+                    "cancelled": "运行已取消",
+                    "failed": "继续运行失败",
+                }.get(continuation_status, "继续运行完成")
+                return run_card(
+                    status=continuation_status,
                     run_id=row["run_id"],
-                    output="已提交，正在继续"
-                    if continuation_status == "completed"
-                    else (
-                        "运行已暂停，请继续处理"
-                        if continuation_status == "paused"
-                        else "运行已取消"
-                        if continuation_status == "cancelled"
-                        else "继续运行失败"
-                    ),
-                ),
-            )
+                    output=output,
+                    requirement_ids=next_requirement_ids,
+                )
+
+            stream = getattr(self.channel, "stream", None)
+            if callable(stream):
+
+                async def producer(controller: Any) -> None:
+                    try:
+                        await consume(controller.update)
+                        final_card = await finish()
+                    except Exception as exc:
+                        # Keep failures on the already-created stream card so a
+                        # continuation cannot leave a stale "running" card.
+                        self.last_error = f"HITL continuation failed: {type(exc).__name__}"
+                        log.debug("HITL continuation stream failed", exc_info=True)
+                        continuation_status = "failed"
+                        if hasattr(self.store, "update_run_by_id"):
+                            await self.store.update_run_by_id(
+                                scope,
+                                row["run_id"],
+                                status=continuation_status,
+                                finished_at=time.time(),
+                                error=str(exc),
+                            )
+                        final_card = run_card(
+                            status=continuation_status,
+                            run_id=row["run_id"],
+                            output="继续运行失败",
+                        )
+                    await controller.update(final_card)
+
+                destination = getattr(
+                    getattr(msg, "conversation", None), "chat_id", None
+                ) or getattr(msg, "chat_id", None)
+                stream_result = stream(
+                    destination,
+                    {
+                        "card": {
+                            "initial": run_card(
+                                status="running", run_id=row["run_id"], output="继续执行中"
+                            ),
+                            "producer": producer,
+                        }
+                    },
+                )
+                if inspect.isawaitable(stream_result):
+                    await stream_result
+            else:
+                await consume()
+                await self._send(msg, await finish())
         except Exception as exc:
             self.last_error = f"HITL continuation failed: {type(exc).__name__}"
             log.debug("HITL continuation failed", exc_info=True)
