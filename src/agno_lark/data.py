@@ -1,14 +1,17 @@
 """Read-only Lark/Feishu Sheets and Base access.
 
-The client deliberately exposes query operations only.  It accepts an injected
-SDK client, which keeps tests and applications that already own a Channel SDK
-client free from another connection or credential store.
+The client deliberately exposes query operations only.  Data access owns an
+OpenAPI SDK client, separate from the messaging channel's client.  Applications
+may also inject a compatible OpenAPI client.
 """
 
 from __future__ import annotations
 
-import inspect
+import asyncio
+import json
+import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -130,11 +133,27 @@ class LarkDataClient:
         max_cells: int | None = None,
     ) -> None:
         self.settings = settings
-        self.client = client or self._build_client()
+        self.client = client if client is not None else self._build_client()
+        auth = getattr(
+            getattr(getattr(self.client, "auth", None), "v3", None), "tenant_access_token", None
+        )
+        if (
+            not callable(getattr(auth, "ainternal", None))
+            or getattr(getattr(self.client, "bitable", None), "v1", None) is None
+        ):
+            raise TypeError(
+                "LarkDataClient requires a lark_oapi.Client with async tenant authentication "
+                "and Base APIs; a messaging channel client is not compatible"
+            )
+        config = getattr(self.client, "_config", None)
+        if config is not None and not getattr(config, "enable_set_token", False):
+            raise TypeError("Injected lark_oapi.Client must use .enable_set_token(True)")
         self.http_client = http_client
         self.max_rows = max_rows or int(getattr(settings, "lark_data_max_rows", 100))
         self.max_cells = max_cells or int(getattr(settings, "lark_data_max_cells", 2000))
         self._token: str | None = None
+        self._token_expires_at = 0.0
+        self._token_lock = asyncio.Lock()
 
     def _build_client(self) -> Any:
         from lark_oapi import Client  # type: ignore[import-untyped]
@@ -144,18 +163,12 @@ class LarkDataClient:
             .app_id(self.settings.feishu_app_id)
             .app_secret(self.settings.feishu_app_secret.get_secret_value())
             .domain(str(self.settings.lark_api_base_url).rstrip("/"))
+            .timeout(float(self.settings.lark_api_timeout))
+            .enable_set_token(True)
             .build()
         )
 
     async def _access_token(self) -> str:
-        if self._token:
-            return self._token
-        auth = getattr(
-            getattr(getattr(self.client, "auth", None), "v3", None), "tenant_access_token", None
-        )
-        internal = getattr(auth, "internal", None)
-        if internal is None:
-            raise RuntimeError("Lark client does not provide tenant token authentication")
         from lark_oapi.api.auth.v3.model.internal_tenant_access_token_request import (  # type: ignore[import-untyped]
             InternalTenantAccessTokenRequest,
         )
@@ -163,22 +176,54 @@ class LarkDataClient:
             InternalTenantAccessTokenRequestBody,
         )
 
-        body = (
-            InternalTenantAccessTokenRequestBody.builder()
-            .app_id(self.settings.feishu_app_id)
-            .app_secret(self.settings.feishu_app_secret.get_secret_value())
-            .build()
-        )
-        result = internal(InternalTenantAccessTokenRequest.builder().request_body(body).build())
-        if inspect.isawaitable(result):
-            result = await result
-        token = _field(_field(result, "data"), "tenant_access_token") or _field(
-            result, "tenant_access_token"
-        )
-        if not token:
-            raise RuntimeError("Lark tenant token response was empty")
-        self._token = str(token)
-        return self._token
+        async with self._token_lock:
+            now = time.monotonic()
+            if self._token and now < self._token_expires_at:
+                return self._token
+            body = (
+                InternalTenantAccessTokenRequestBody.builder()
+                .app_id(self.settings.feishu_app_id)
+                .app_secret(self.settings.feishu_app_secret.get_secret_value())
+                .build()
+            )
+            result = await self.client.auth.v3.tenant_access_token.ainternal(
+                InternalTenantAccessTokenRequest.builder().request_body(body).build()
+            )
+            code = _field(result, "code")
+            if code not in (None, 0):
+                safe_code = code if isinstance(code, int) else "unknown"
+                raise RuntimeError(f"Lark tenant authentication failed (code={safe_code})")
+            payload = _field(result, "data") or result
+            token = _field(payload, "tenant_access_token")
+            expire = _field(payload, "expire")
+            # Some SDK versions discard top-level token fields in their generated
+            # response model.  The actual tenant-token endpoint returns them there.
+            if not token:
+                raw = _field(_field(result, "raw"), "content")
+                if raw:
+                    try:
+                        payload = json.loads(raw)
+                    except (ValueError, TypeError):
+                        raise RuntimeError("Lark tenant token response was invalid") from None
+                    token = _field(payload, "tenant_access_token")
+                    expire = _field(payload, "expire")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("Lark tenant token response was empty")
+            try:
+                ttl = float(expire)
+            except (TypeError, ValueError):
+                raise RuntimeError("Lark tenant token response has invalid expiry") from None
+            if not math.isfinite(ttl) or ttl <= 0:
+                raise RuntimeError("Lark tenant token response has invalid expiry")
+            self._token = token
+            self._token_expires_at = now + ttl - min(60.0, ttl / 2)
+            return self._token
+
+    async def _request_options(self) -> Any:
+        from lark_oapi import RequestOption
+
+        # Passing the token explicitly avoids the SDK's blocking auto-auth path.
+        return RequestOption.builder().tenant_access_token(await self._access_token()).build()
 
     async def read_sheet_values(
         self, spreadsheet_url_or_token: str, cell_range: str
@@ -225,7 +270,9 @@ class LarkDataClient:
         from lark_oapi.api.bitable.v1 import ListAppTableRequest  # type: ignore[import-untyped]
 
         request = ListAppTableRequest.builder().app_token(app).page_size(page_size).build()
-        response = await self.client.bitable.v1.app_table.alist(request)
+        response = await self.client.bitable.v1.app_table.alist(
+            request, await self._request_options()
+        )
         _ensure_sdk_success(response)
         data = _field(response, "data", response)
         items = _field(data, "items", []) or []
@@ -269,7 +316,9 @@ class LarkDataClient:
                 ListAppTableRecordRequest.builder().app_token(app).table_id(table).page_size(size)
             )
             request = builder.page_token(page_token).build() if page_token else builder.build()
-            response = await self.client.bitable.v1.app_table_record.alist(request)
+            response = await self.client.bitable.v1.app_table_record.alist(
+                request, await self._request_options()
+            )
         else:
             from lark_oapi.api.bitable.v1 import (
                 Condition,
@@ -278,6 +327,7 @@ class LarkDataClient:
                 SearchAppTableRecordRequest,
                 SearchAppTableRecordRequestBody,
             )
+
             condition = (
                 Condition.builder()
                 .field_name("关键词")
@@ -298,7 +348,9 @@ class LarkDataClient:
             if page_token:
                 builder = builder.page_token(page_token)
             try:
-                response = await self.client.bitable.v1.app_table_record.asearch(builder.build())
+                response = await self.client.bitable.v1.app_table_record.asearch(
+                    builder.build(), await self._request_options()
+                )
                 _ensure_sdk_success(response)
             except Exception:
                 # The search API requires a field name.  If a Base does not
@@ -311,14 +363,12 @@ class LarkDataClient:
                     .page_size(size)
                     .build()
                 )
-                response = await self.client.bitable.v1.app_table_record.alist(list_request)
+                response = await self.client.bitable.v1.app_table_record.alist(
+                    list_request, await self._request_options()
+                )
                 data = _field(response, "data", response)
                 items = _field(data, "items", []) or []
-                matched = [
-                    item
-                    for item in items
-                    if keyword.lower() in str(_plain(item)).lower()
-                ]
+                matched = [item for item in items if keyword.lower() in str(_plain(item)).lower()]
                 return BaseRecordListResult(
                     app,
                     table,
@@ -418,7 +468,8 @@ class LarkDataTools(LarkSheetsTools, LarkBaseTools):
 
 
 def build_lark_data_client(settings: Any, channel: Any | None = None) -> LarkDataClient:
-    return LarkDataClient(settings, client=getattr(channel, "client", None))
+    """Build a dedicated OpenAPI client; ``channel`` is kept for API compatibility."""
+    return LarkDataClient(settings)
 
 
 __all__ = [

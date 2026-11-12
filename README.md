@@ -160,6 +160,20 @@ Cancellation first records `cancel_requested` and then calls the scoped AgentOS 
 
 Enable the Lark/Feishu read scopes for Sheets and Base/Bitable and grant the bot access to each resource. This release uses the application's tenant access token and does not implement OAuth user tokens.
 
+The data client builds its own `lark_oapi.Client` from `FEISHU_APP_ID` and
+`FEISHU_APP_SECRET`; it does not reuse `FeishuChannel.client`. Token acquisition
+is asynchronous, cached until shortly before expiry, and shared by Sheets and
+Base reads. `LARK_API_TIMEOUT` applies to the data SDK as well as Sheets HTTP
+requests. No manually configured tenant token or user login is required.
+
+`build_lark_data_client(settings, channel=...)` still accepts `channel` for
+compatibility, but does not use its messaging client. For explicit injection via
+`LarkDataClient(settings, client=...)`, supply an OpenAPI client with async tenant
+authentication and Base APIs, built with `.enable_set_token(True)`. This allows
+Base requests to use the asynchronously acquired token without SDK auto-auth
+blocking the event loop. `LarkInterface(data_client=...)` remains available for
+applications that manage their own data access.
+
 ```text
 /sheet https://open.feishu.cn/sheets/shtxxxxxxxx Sheet1!A1:D20
 /base https://open.feishu.cn/base/appxxxxxxxx tblxxxxxxxx
@@ -201,6 +215,14 @@ Continuation preserves the original `session_id`, `user_id`, and Bearer token. S
 The default database `.data/agno-feishu.sqlite3` uses WAL and a busy timeout. It contains `schema_version`, `dedup_messages`, `session_scopes`, `runs`, and `hitl_requirements`. Message deduplication defaults to 24 hours and run/HITL records are retained for 7 days.
 
 If no messages arrive, check application publication, WebSocket subscriptions, bot membership, and allowlists. For 401/403 responses, check the AgentOS token, target ID, and AgentOS authorization. For resource failures, check Lark/Feishu resource-read permissions. Logs do not include the App Secret, AgentOS token, raw file contents, or complete user messages.
+
+In releases up to `0.1.4`, `Lark client does not provide tenant token authentication`
+can be caused by a messaging client being passed to the data layer. It is a client
+compatibility error raised before a token request, not evidence of missing API
+scopes. Upgrade to `0.1.5` or later. Authentication rejection reports a sanitized
+API code; after authentication succeeds, resource reads still require application
+read scopes and access to the specific Sheet or Base. `/wiki/` links must first be
+resolved to the underlying resource token; Wiki URL resolution is not included.
 
 If your shell exports a SOCKS proxy and the local environment does not have `socksio`, set `NO_PROXY=127.0.0.1,localhost` (and the AgentOS hostname) when testing a local AgentOS. If outbound AgentOS requests must use a SOCKS proxy, install the HTTPX SOCKS extra in the deployment environment with `uv pip install "httpx[socks]>=0.28,<1"`.
 

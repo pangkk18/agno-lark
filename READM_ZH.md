@@ -153,6 +153,17 @@ app = agent_os.get_app()
 
 在 Lark/Feishu 开放平台为应用开通 Sheets 和 Base/Bitable 的只读权限，并确保机器人可以访问目标资源。本版本默认使用应用的 tenant access token，不实现 OAuth 用户 Token。
 
+数据模块使用 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 创建独立的 `lark_oapi.Client`，
+不复用 `FeishuChannel.client`。Token 通过异步接口获取并在过期前刷新，Sheets 和 Base
+共用该缓存。`LARK_API_TIMEOUT` 同时应用于数据 SDK 和 Sheets HTTP 请求，不需要手动
+填写 tenant token 或执行用户登录授权。
+
+`build_lark_data_client(settings, channel=...)` 为兼容保留 `channel` 参数，但不再使用其消息
+客户端。如果通过 `LarkDataClient(settings, client=...)` 显式注入客户端，应传入支持异步
+tenant 认证和 Base API 的 OpenAPI 客户端，并使用 `.enable_set_token(True)` 构建。
+这样 Base 请求才能使用异步获取的 token，避免 SDK 自动鉴权阻塞事件循环。
+应用仍可通过 `LarkInterface(data_client=...)` 注入自己管理的数据访问对象。
+
 ```text
 /sheet https://open.feishu.cn/sheets/shtxxxxxxxx Sheet1!A1:D20
 /base https://open.feishu.cn/base/appxxxxxxxx tblxxxxxxxx
@@ -192,6 +203,12 @@ Agent、Team 或 Workflow 暂停时，桥接器把要求保存到 SQLite，并�
 ## 状态数据库和排查
 
 默认数据库 `.data/agno-feishu.sqlite3` 启用 WAL 和 busy timeout，包含 `schema_version`、`dedup_messages`、`session_scopes`、`runs` 和 `hitl_requirements`；去重默认 24 小时，运行及 HITL 记录默认保留 7 天。该文件名保留 `agno-feishu` 以兼容已有状态数据。没有消息时检查应用发布、WebSocket 订阅、机器人群成员资格和白名单；401/403 时检查 Token、目标 ID 和 AgentOS 鉴权；资源失败时检查 Lark/Feishu 资源读取权限。日志不会输出 App Secret、AgentOS Token、原始文件内容或完整用户消息。
+
+`0.1.4` 及更早版本中的 `Lark client does not provide tenant token authentication`
+可能由消息客户端误传给数据模块引起。该异常在申请 token 之前抛出，不能据此判断缺少
+API 权限；请升级到 `0.1.5` 或更新版本。认证被拒绝时会返回不含敏感内容的 API 错误码。
+认证成功后，仍需要应用的只读 scope 和目标表格的资源访问权限。`/wiki/` 链接需要先解析为
+真实表格 token；本次修复不包含知识库链接解析。
 
 如果终端设置了 SOCKS 代理，而当前环境没有安装 `socksio`，本地验证时请设置 `NO_PROXY=127.0.0.1,localhost`（以及 AgentOS 主机名）。如果 AgentOS 必须通过 SOCKS 代理访问，请在部署环境安装 HTTPX SOCKS 扩展：`uv pip install "httpx[socks]>=0.28,<1"`。
 

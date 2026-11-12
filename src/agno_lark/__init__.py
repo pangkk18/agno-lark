@@ -43,4 +43,4 @@ __all__ = [
     "build_lark_data_client",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.5"
