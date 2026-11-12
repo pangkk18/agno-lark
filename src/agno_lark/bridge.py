@@ -211,7 +211,7 @@ class LarkBridge:
             if hasattr(self.store, "clear_hitl_requirements"):
                 await self.store.clear_hitl_requirements(scope)
             await self._send(msg, run_card(status="completed", output="已重置会话"))
-        elif command in {"/sheet", "/base"}:
+        elif command in {"/sheet", "/base", "/wiki", "/lingo"}:
             await self._handle_data_command(command, args, msg)
         elif command == "/status":
             run = self.active.get(scope)
@@ -287,7 +287,7 @@ class LarkBridge:
                     title="Lark/Feishu Sheet", headers=headers, rows=rows,
                     truncated=result.truncated,
                 )
-            else:
+            elif command == "/base":
                 if len(args) < 2:
                     raise ValueError("用法：/base <URL 或 token> <table_id> [关键词]")
                 result = (
@@ -302,6 +302,10 @@ class LarkBridge:
                     title="Lark/Feishu Base", headers=headers, rows=rows,
                     truncated=result.truncated,
                 )
+            elif command == "/wiki":
+                card = await self._wiki_command_card(args)
+            else:
+                card = await self._lingo_command_card(args)
             await self._send(msg, card)
         except ValueError as exc:
             await self._send(
@@ -309,11 +313,152 @@ class LarkBridge:
             )
         except Exception as exc:
             self.last_error = f"data read failed: {type(exc).__name__}"
-            log.debug("Lark data read failed", exc_info=True)
+            log.debug("Lark data read failed", extra={"error_type": type(exc).__name__})
             await self._send(
                 msg,
                 data_card(title="Lark 数据", headers=[], rows=[], error="请检查资源权限和配置"),
             )
+
+    @staticmethod
+    def _data_page_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
+        if "--page-token" not in args:
+            return args, {}
+        if len(args) < 3 or args.count("--page-token") != 1 or args[-2] != "--page-token":
+            raise ValueError("用法：在原查询末尾添加 --page-token <下一页游标>")
+        return args[:-2], {"page_token": args[-1]}
+
+    async def _wiki_command_card(self, args: list[str]) -> dict[str, Any]:
+        assert self.data_client is not None
+        args, options = self._data_page_args(args)
+        if args and args[0] == "ls":
+            if not 2 <= len(args) <= 4:
+                raise ValueError("用法：/wiki ls <space_id> [parent_node_token] [page_token]")
+            if len(args) > 2:
+                options["parent_node_token"] = args[2]
+            if len(args) > 3:
+                if "page_token" in options:
+                    raise ValueError("用法：只指定一个 page_token")
+                options["page_token"] = args[3]
+            result = await self.data_client.list_wiki_nodes(args[1], **options)
+            return data_card(
+                title="Lark/Feishu Wiki 节点",
+                headers=["标题", "类型", "节点 ID"],
+                rows=[
+                    [item.get("title", ""), item.get("obj_type", ""), item.get("node_token", "")]
+                    for item in result.nodes
+                ],
+                truncated=result.truncated,
+                has_more=result.has_more,
+                page_token=result.page_token,
+            )
+        if not 1 <= len(args) <= 2:
+            raise ValueError("用法：/wiki <URL 或 token> [Sheet!A1:D20 或 table_id]")
+        if len(args) == 2:
+            options["table_id" if args[1].startswith("tbl") else "cell_range"] = args[1]
+        result = await self.data_client.read_wiki(args[0], **options)
+        headers: list[str] = []
+        rows: list[list[Any]] = []
+        if result.values is not None:
+            headers = [str(value) for value in (result.values[0] if result.values else [])]
+            rows = result.values[1:]
+        elif result.records is not None:
+            records = [item.get("fields", item) for item in result.records]
+            headers = list(dict.fromkeys(key for item in records for key in item))
+            rows = [[item.get(key, "") for key in headers] for item in records]
+        return data_card(
+            title=f"Lark/Feishu Wiki · {result.node.get('title') or '知识库'}",
+            content=result.content,
+            headers=headers,
+            rows=rows,
+            truncated=result.truncated,
+            has_more=result.has_more,
+            page_token=result.page_token,
+        )
+
+    async def _lingo_command_card(self, args: list[str]) -> dict[str, Any]:
+        assert self.data_client is not None
+        args, options = self._data_page_args(args)
+        usage = (
+            "用法：/lingo <关键词或分类链接>；/lingo search <repo_id 或分类链接> <关键词>；"
+            "/lingo get <entity_id>；/lingo repos；"
+            "/lingo categories <repo_id> [page_token]；/lingo list <repo_id> [page_token]；"
+            "分页查询可在末尾添加 --page-token <游标>"
+        )
+        if not args:
+            raise ValueError(usage)
+        action = args[0]
+        if action == "get":
+            if len(args) != 2 or options:
+                raise ValueError(usage)
+            item = await self.data_client.get_lingo_entity(args[1])
+            return self._lingo_result_card([item], truncated=bool(item.get("truncated")))
+        if action == "repos":
+            if len(args) != 1 or options:
+                raise ValueError(usage)
+            result = await self.data_client.list_lingo_repos()
+        elif action in {"categories", "list"}:
+            if not 2 <= len(args) <= 3:
+                raise ValueError(usage)
+            if len(args) == 3:
+                if "page_token" in options:
+                    raise ValueError(usage)
+                options["page_token"] = args[2]
+            if action == "categories":
+                result = await self.data_client.list_lingo_classifications(args[1], **options)
+            else:
+                result = await self.data_client.list_lingo_entities(args[1], **options)
+        elif action == "search":
+            if len(args) < 3:
+                raise ValueError(usage)
+            keyword = " ".join(args[2:])
+            if args[1].startswith(("https://", "http://")):
+                result = await self.data_client.read_lingo_category(
+                    args[1], keyword=keyword, **options
+                )
+            else:
+                result = await self.data_client.search_lingo_entities(
+                    keyword, repo_id=args[1], **options
+                )
+        elif args[0].startswith(("https://", "http://")):
+            if len(args) != 1:
+                raise ValueError(usage)
+            result = await self.data_client.read_lingo_category(args[0], **options)
+        else:
+            result = await self.data_client.search_lingo_entities(" ".join(args), **options)
+        return self._lingo_result_card(
+            result.items,
+            listing=action in {"repos", "categories"},
+            truncated=result.truncated,
+            has_more=result.has_more,
+            page_token=result.page_token,
+        )
+
+    def _lingo_result_card(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        listing: bool = False,
+        truncated: bool = False,
+        has_more: bool = False,
+        page_token: str | None = None,
+    ) -> dict[str, Any]:
+        rows = []
+        for item in items:
+            if listing:
+                rows.append([item.get("name", ""), item.get("id", "")])
+            else:
+                keys = item.get("main_keys") or item.get("full_names") or []
+                name = ", ".join(str(key.get("key", "")) for key in keys)
+                rows.append([name, item.get("description") or "", item.get("id", "")])
+        return data_card(
+            title="Lark/Feishu Lingo",
+            headers=["名称", "ID"] if listing else ["词条", "释义", "ID"],
+            rows=rows,
+            content=None if items else "未找到可访问的结果。",
+            truncated=truncated,
+            has_more=has_more,
+            page_token=page_token,
+        )
 
     async def _continue_paused(
         self, scope: str, session_id: str, msg: Any, command: str, args: list[str]

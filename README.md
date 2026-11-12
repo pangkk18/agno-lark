@@ -30,7 +30,7 @@ The Chinese documentation is available in [`READM_ZH.md`](READM_ZH.md).
 - Streaming Feishu cards with status, run ID, elapsed time, and cancellation actions.
 - `/new`, `/status`, `/cancel [run_id]`, and `/help` commands.
 - User and chat allowlists, reconnect handling, error handling, and structured logging.
-- Read-only Lark/Feishu Sheets ranges and Base/Bitable records as AgentOS tools or bridge commands.
+- Read-only Lark/Feishu Sheets, Base/Bitable, Wiki, and Lingo data as AgentOS tools or bridge commands.
 - Agno HITL continuation for confirmation, rejection, user input, feedback, external execution, and workflow steps.
 
 The bridge does not process audio, video, or voice messages. Data access is strictly read-only and uses the bot tenant access token.
@@ -96,6 +96,7 @@ LARK_API_BASE_URL=https://open.feishu.cn
 LARK_API_TIMEOUT=20
 LARK_DATA_MAX_ROWS=100
 LARK_DATA_MAX_CELLS=2000
+LARK_DATA_MAX_CHARS=12000
 LARK_BASE_PAGE_SIZE=50
 
 BRIDGE_HOST=127.0.0.1
@@ -156,21 +157,30 @@ app = agent_os.get_app()
 
 Cancellation first records `cancel_requested` and then calls the scoped AgentOS cancel endpoint. The final state comes from the SSE terminal event. Card actions re-check the operator and chat allowlists before starting status or cancellation work.
 
-## Sheets and Base read access
+## Sheets, Base, Wiki, and Lingo read access
 
-Enable the Lark/Feishu read scopes for Sheets and Base/Bitable and grant the bot access to each resource. This release uses the application's tenant access token and does not implement OAuth user tokens.
+Data access uses the application's tenant access token and does not implement OAuth user tokens. Enable the required application scopes and grant the application access to each private resource:
+
+| Resource | Required application scopes | Resource access |
+| --- | --- | --- |
+| Sheets | `sheets:spreadsheet:readonly` | Grant the application access to the spreadsheet. |
+| Base/Bitable | `bitable:app:readonly` | Grant the application access to the Base. |
+| Wiki | `wiki:node:read`, plus `docx:document:readonly` for Docx bodies | Add the application to the Wiki node/document or make it accessible in the knowledge space. `wiki:node:retrieve` is additionally needed to list child nodes. |
+| Lingo | `baike:entity:readonly` | Custom apps can read visible repositories; add the application in the repository settings for a repository that is not globally visible. |
+
+Scopes authorize the API operation, while resource sharing authorizes access to a specific document, knowledge space, Base, or Lingo repository. Both may be required. See the official [Wiki node API](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node.md), [Docx raw content API](https://open.feishu.cn/document/server-docs/docs/docx-v1/document/raw_content.md), [Lingo repository API](https://open.feishu.cn/document/lingo-v1/repo/list.md), and [Lingo entity API](https://open.feishu.cn/document/lingo-v1/entity/get.md).
 
 The data client builds its own `lark_oapi.Client` from `FEISHU_APP_ID` and
 `FEISHU_APP_SECRET`; it does not reuse `FeishuChannel.client`. Token acquisition
-is asynchronous, cached until shortly before expiry, and shared by Sheets and
-Base reads. `LARK_API_TIMEOUT` applies to the data SDK as well as Sheets HTTP
-requests. No manually configured tenant token or user login is required.
+is asynchronous, cached until shortly before expiry, and shared by all data
+reads. `LARK_API_TIMEOUT` applies to the data SDK and direct HTTP reads. No
+manually configured tenant token or user login is required.
 
 `build_lark_data_client(settings, channel=...)` still accepts `channel` for
 compatibility, but does not use its messaging client. For explicit injection via
 `LarkDataClient(settings, client=...)`, supply an OpenAPI client with async tenant
-authentication and Base APIs, built with `.enable_set_token(True)`. This allows
-Base requests to use the asynchronously acquired token without SDK auto-auth
+authentication and the required OpenAPI services, built with `.enable_set_token(True)`. This allows
+requests to use the asynchronously acquired token without SDK auto-auth
 blocking the event loop. `LarkInterface(data_client=...)` remains available for
 applications that manage their own data access.
 
@@ -178,22 +188,42 @@ applications that manage their own data access.
 /sheet https://open.feishu.cn/sheets/shtxxxxxxxx Sheet1!A1:D20
 /base https://open.feishu.cn/base/appxxxxxxxx tblxxxxxxxx
 /base appxxxxxxxx tblxxxxxxxx keyword
+/wiki https://example.feishu.cn/wiki/wikcnxxxxxxxx
+/wiki https://example.feishu.cn/wiki/wikcnxxxxxxxx Sheet1!A1:D20
+/wiki https://example.feishu.cn/wiki/wikcnxxxxxxxx tblxxxxxxxx [--page-token <cursor>]
+/wiki ls <space_id> [parent_node_token] [page_token]
+/wiki ls <space_id> [parent_node_token] --page-token <cursor>
+/lingo deployment [--page-token <cursor>]
+/lingo https://example.feishu.cn/lingo/category?unit_id=...&primary_class=... [--page-token <cursor>]
+/lingo search <repo_id_or_category_url> deployment [--page-token <cursor>]
+/lingo get <entity_id>
+/lingo repos
+/lingo categories <repo_id> [page_token]
+/lingo list <repo_id> [page_token]
 ```
 
-URLs may be replaced by raw spreadsheet or app tokens. A Sheet range and a Base `table_id` are required. Results are bounded cards; credentials are never echoed. There are no write, delete, permission, or Wiki URL operations.
+`/wiki` resolves the node and reads supported underlying `docx`, `sheet`, or `bitable` resources. Docx content is returned as bounded plain text; a Sheet range or Base `table_id` is required for those underlying types. Legacy Doc, file, Slides, and other node types return an explicit unsupported-type error. `/sheet` and `/base` also accept a Wiki URL when its underlying resource type matches the command.
+
+`/lingo <keyword>` performs a global fuzzy search. A category URL lists that category, while `search` scopes fuzzy search to a repository or resolvable category. The web page's `unit_id` and `primary_class` parameters are not documented as stable OpenAPI identifiers, so the client verifies them against repositories and classifications visible to the application. An unresolved category fails safely and never falls back to a global search. It does not scrape the Lark/Feishu UI or call private APIs.
+
+Paged commands return one bounded page. When the API reports more data, the card tells the user to repeat the original query with the trailing `--page-token <cursor>` option; it does not echo the complete original command. The older positional cursor remains accepted for `/wiki ls`, `/lingo categories`, and `/lingo list`. Root Wiki listings can use `/wiki ls <space_id> --page-token <cursor>` without inventing a parent node. The official Lingo repository-list endpoint is unpaged, so `/lingo repos` does not accept a cursor. Toolkit methods accept an explicit `page_token` where the underlying API is paged.
+
+Text is truncated at `LARK_DATA_MAX_CHARS` (12,000 characters by default), tabular results use the configured row/cell bounds, and Base uses `LARK_BASE_PAGE_SIZE`. Credentials, original resource URLs and their query parameters, and underlying Wiki object tokens are not echoed. Wiki node IDs and Lingo repository, classification, and entity IDs are intentionally shown because they are required for follow-up reads. Every operation is read-only; Lingo fuzzy search uses the official read-only search API even though that endpoint uses HTTP POST.
 
 For an embedded local AgentOS, register the reusable tools on the target:
 
 ```python
 from agno.agent import Agent
-from agno_lark import LarkBaseTools, LarkSheetsTools, build_lark_data_client, load_settings
+from agno_lark import LarkDataTools, build_lark_data_client, load_settings
 
 settings = load_settings()
 data = build_lark_data_client(settings)
-agent = Agent(tools=[LarkSheetsTools(data), LarkBaseTools(data)])
+agent = Agent(tools=[LarkDataTools(data)])
 ```
 
-Remote AgentOS targets use the bridge commands because tools cannot be injected into a separate AgentOS process.
+`LarkDataTools` combines `LarkSheetsTools`, `LarkBaseTools`, `LarkWikiTools`, and `LarkLingoTools`. The client exposes `read_wiki`, `resolve_wiki_node`, `list_wiki_nodes`, `list_lingo_repos`, `list_lingo_classifications`, `list_lingo_entities`, `get_lingo_entity`, `search_lingo_entities`, and `read_lingo_category` for direct integrations. Remote AgentOS targets use the bridge commands because tools cannot be injected into a separate AgentOS process. See [`examples/local_data_tools.py`](examples/local_data_tools.py) for a local Agent example.
+
+For a manual acceptance check, use resources explicitly shared with the application: read a Docx Wiki URL, read one Wiki-backed Sheet range and one Wiki-backed Base table, list a knowledge-space page, search a known Lingo term, retrieve its entity, and list a visible repository and its categories. Exercise `--page-token` on a paged Wiki, category, entity, or search result when available. Then repeat with an unshared resource and an invalid category URL. The expected results are bounded data for authorized resources, a sanitized permission error for the unshared resource, and no unscoped fallback for the invalid category. These checks validate the configured tenant; the project test suite does not access private tenant resources.
 
 ## HITL continuation
 
@@ -221,8 +251,7 @@ can be caused by a messaging client being passed to the data layer. It is a clie
 compatibility error raised before a token request, not evidence of missing API
 scopes. Upgrade to `0.1.5` or later. Authentication rejection reports a sanitized
 API code; after authentication succeeds, resource reads still require application
-read scopes and access to the specific Sheet or Base. `/wiki/` links must first be
-resolved to the underlying resource token; Wiki URL resolution is not included.
+read scopes and access to the specific resource.
 
 If your shell exports a SOCKS proxy and the local environment does not have `socksio`, set `NO_PROXY=127.0.0.1,localhost` (and the AgentOS hostname) when testing a local AgentOS. If outbound AgentOS requests must use a SOCKS proxy, install the HTTPX SOCKS extra in the deployment environment with `uv pip install "httpx[socks]>=0.28,<1"`.
 

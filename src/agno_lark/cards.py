@@ -88,6 +88,11 @@ def help_card() -> dict[str, Any]:
             "/new 重置会话\n/status 查看运行\n/cancel 取消运行\n"
             "/sheet <token> <Sheet!A1:D20> 读取表格\n"
             "/base <token> <table_id> [关键词] 读取多维表格\n"
+            "/wiki <URL 或 token> [范围或 table_id] 读取知识库\n"
+            "/wiki ls <space_id> [parent_node_token] [page_token] 列出节点\n"
+            "/lingo <关键词或分类链接> 查询词典\n"
+            "/lingo get <entity_id> 读取词条\n"
+            "/lingo repos、categories、list、search 浏览或搜索词库\n"
             "/approve、/reject、/input、/feedback、/external 处理 HITL\n/help 查看帮助"
         ),
     )
@@ -100,12 +105,17 @@ def data_card(
     rows: list[list[Any]],
     truncated: bool = False,
     error: str | None = None,
+    content: str | None = None,
+    has_more: bool = False,
+    page_token: str | None = None,
 ) -> dict[str, Any]:
-    """Render bounded Sheet/Base data without echoing resource credentials."""
+    """Render read-only data or document text with pagination metadata."""
     if error:
         content = f"**{title}**\n\n读取失败：{error}"
     else:
         lines = [f"**{title}**"]
+        if content:
+            lines.append(content)
         if headers:
             lines.append(" | ".join(str(item) for item in headers))
             lines.append(" | ".join("---" for _ in headers))
@@ -114,6 +124,10 @@ def data_card(
             lines.append(" | ".join(values))
         if truncated:
             lines.append("\n已截断：结果超过桥接器配置的读取上限。")
+        if has_more:
+            lines.append("\n还有更多结果，请再次发送原查询并在末尾添加下一页参数。")
+            if page_token:
+                lines.append(f"`--page-token {page_token}`")
         content = "\n".join(lines)
     return {
         "schema": "2.0",

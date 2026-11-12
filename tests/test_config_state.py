@@ -34,6 +34,20 @@ def test_group_session_mode_can_use_shared_context() -> None:
     assert settings.group_session_mode == "shared"
 
 
+def test_knowledge_text_limit_environment_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    common = dict(
+        feishu_app_id="x", feishu_app_secret="s", agentos_url="http://localhost",
+        target_id="assistant", _env_file=None,
+    )
+    monkeypatch.delenv("LARK_DATA_MAX_CHARS", raising=False)
+    assert LarkSettings(**common).lark_data_max_chars == 12000
+    monkeypatch.setenv("LARK_DATA_MAX_CHARS", "2500")
+    assert LarkSettings(**common).lark_data_max_chars == 2500
+    monkeypatch.setenv("LARK_DATA_MAX_CHARS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        LarkSettings(**common)
+
+
 def test_target_factory() -> None:
     common = dict(feishu_app_id="x", feishu_app_secret="s", agentos_url="http://localhost")
     for kind, attr in (("agent", "agent_id"), ("team", "team_id"), ("workflow", "workflow_id")):

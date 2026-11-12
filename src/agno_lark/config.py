@@ -61,6 +61,9 @@ class LarkSettings(BaseSettings):
     lark_data_max_cells: int = Field(
         default=2000, validation_alias=AliasChoices("LARK_DATA_MAX_CELLS", "lark_data_max_cells")
     )
+    lark_data_max_chars: int = Field(
+        default=12000, validation_alias=AliasChoices("LARK_DATA_MAX_CHARS", "lark_data_max_chars")
+    )
     lark_base_page_size: int = Field(
         default=50, validation_alias=AliasChoices("LARK_BASE_PAGE_SIZE", "lark_base_page_size")
     )
@@ -85,7 +88,8 @@ class LarkSettings(BaseSettings):
         return {str(item).strip() for item in value if str(item).strip()}
 
     @field_validator(
-        "lark_api_timeout", "lark_data_max_rows", "lark_data_max_cells", "lark_base_page_size"
+        "lark_api_timeout", "lark_data_max_rows", "lark_data_max_cells",
+        "lark_data_max_chars", "lark_base_page_size",
     )
     @classmethod
     def positive_data_limits(cls, value: Any) -> Any:
