@@ -48,6 +48,22 @@ class LarkSettings(BaseSettings):
     bridge_port: int = Field(
         default=7788, validation_alias=AliasChoices("BRIDGE_PORT", "bridge_port")
     )
+    lark_api_base_url: AnyHttpUrl = Field(
+        default=AnyHttpUrl("https://open.feishu.cn"),
+        validation_alias=AliasChoices("LARK_API_BASE_URL", "lark_api_base_url"),
+    )
+    lark_api_timeout: float = Field(
+        default=20.0, validation_alias=AliasChoices("LARK_API_TIMEOUT", "lark_api_timeout")
+    )
+    lark_data_max_rows: int = Field(
+        default=100, validation_alias=AliasChoices("LARK_DATA_MAX_ROWS", "lark_data_max_rows")
+    )
+    lark_data_max_cells: int = Field(
+        default=2000, validation_alias=AliasChoices("LARK_DATA_MAX_CELLS", "lark_data_max_cells")
+    )
+    lark_base_page_size: int = Field(
+        default=50, validation_alias=AliasChoices("LARK_BASE_PAGE_SIZE", "lark_base_page_size")
+    )
 
     @field_validator("target_id", mode="before")
     @classmethod
@@ -67,6 +83,15 @@ class LarkSettings(BaseSettings):
         if isinstance(value, str):
             return {item.strip() for item in value.split(",") if item.strip()}
         return {str(item).strip() for item in value if str(item).strip()}
+
+    @field_validator(
+        "lark_api_timeout", "lark_data_max_rows", "lark_data_max_cells", "lark_base_page_size"
+    )
+    @classmethod
+    def positive_data_limits(cls, value: Any) -> Any:
+        if float(value) <= 0:
+            raise ValueError("Lark data limits and timeout must be positive")
+        return value
 
     def model_post_init(self, __context: Any) -> None:
         if not self.target_id:

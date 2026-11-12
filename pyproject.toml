@@ -1,6 +1,6 @@
 [project]
 name = "agno-lark"
-version = "0.1.2"
+version = "0.1.3"
 description = "A lightweight Python bridge between Lark/Feishu and Agno AgentOS."
 readme = "README.md"
 authors = [
@@ -24,6 +24,7 @@ dependencies = [
     "aiosqlite>=0.20,<1",
     "httpx[socks]>=0.28,<1",
     "lark-channel-sdk>=1.4,<2",
+    "lark-oapi>=1.7,<2",
     "pydantic-settings>=2.6,<3",
 ]
 

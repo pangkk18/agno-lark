@@ -27,6 +27,7 @@ class LarkInterface(BaseInterface):
         settings: Any,
         store: Any | None = None,
         channel: Any | None = None,
+        data_client: Any | None = None,
         prefix: str = "/feishu",
     ) -> None:
         self.target, self.settings, self.store = target, settings, store
@@ -64,7 +65,18 @@ class LarkInterface(BaseInterface):
                 security=SecurityConfig(mode="strict", allow_local_insecure_ws=True),
             )
         self.channel = channel
-        self.bridge = LarkBridge(target=target, settings=settings, store=store, channel=channel)
+        if data_client is None and getattr(channel, "client", None) is not None:
+            from .data import build_lark_data_client
+
+            data_client = build_lark_data_client(settings, channel=channel)
+        self.data_client = data_client
+        self.bridge = LarkBridge(
+            target=target,
+            settings=settings,
+            store=store,
+            channel=channel,
+            data_client=data_client,
+        )
         self.router = self.get_router()
 
     def get_scope_mappings(self) -> dict[str, list[str]]:
@@ -92,7 +104,7 @@ class LarkInterface(BaseInterface):
 
         @router.get("/status")
         async def status() -> dict[str, Any]:
-            return self.bridge.status()
+            return await self.bridge.status_snapshot()
 
         return router
 

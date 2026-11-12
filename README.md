@@ -30,8 +30,10 @@ The Chinese documentation is available in [`READM_ZH.md`](READM_ZH.md).
 - Streaming Feishu cards with status, run ID, elapsed time, and cancellation actions.
 - `/new`, `/status`, `/cancel [run_id]`, and `/help` commands.
 - User and chat allowlists, reconnect handling, error handling, and structured logging.
+- Read-only Lark/Feishu Sheets ranges and Base/Bitable records as AgentOS tools or bridge commands.
+- Agno HITL continuation for confirmation, rejection, user input, feedback, external execution, and workflow steps.
 
-The first release does not process audio, video, or voice messages and does not implement HITL resume approval. Long-running tasks use foreground SSE streaming.
+The bridge does not process audio, video, or voice messages. Data access is strictly read-only and uses the bot tenant access token.
 
 ## Requirements and installation
 
@@ -89,6 +91,12 @@ FEISHU_ALLOWED_USER_IDS=
 FEISHU_ALLOWED_CHAT_IDS=
 # user (default: one context per member) or shared (one context per chat/thread)
 FEISHU_GROUP_SESSION_MODE=user
+
+LARK_API_BASE_URL=https://open.feishu.cn
+LARK_API_TIMEOUT=20
+LARK_DATA_MAX_ROWS=100
+LARK_DATA_MAX_CELLS=2000
+LARK_BASE_PAGE_SIZE=50
 
 BRIDGE_HOST=127.0.0.1
 BRIDGE_PORT=7788
@@ -148,9 +156,49 @@ app = agent_os.get_app()
 
 Cancellation first records `cancel_requested` and then calls the scoped AgentOS cancel endpoint. The final state comes from the SSE terminal event. Card actions re-check the operator and chat allowlists before starting status or cancellation work.
 
+## Sheets and Base read access
+
+Enable the Lark/Feishu read scopes for Sheets and Base/Bitable and grant the bot access to each resource. This release uses the application's tenant access token and does not implement OAuth user tokens.
+
+```text
+/sheet https://open.feishu.cn/sheets/shtxxxxxxxx Sheet1!A1:D20
+/base https://open.feishu.cn/base/appxxxxxxxx tblxxxxxxxx
+/base appxxxxxxxx tblxxxxxxxx keyword
+```
+
+URLs may be replaced by raw spreadsheet or app tokens. A Sheet range and a Base `table_id` are required. Results are bounded cards; credentials are never echoed. There are no write, delete, permission, or Wiki URL operations.
+
+For an embedded local AgentOS, register the reusable tools on the target:
+
+```python
+from agno.agent import Agent
+from agno_lark import LarkBaseTools, LarkSheetsTools, build_lark_data_client, load_settings
+
+settings = load_settings()
+data = build_lark_data_client(settings)
+agent = Agent(tools=[LarkSheetsTools(data), LarkBaseTools(data)])
+```
+
+Remote AgentOS targets use the bridge commands because tools cannot be injected into a separate AgentOS process.
+
+## HITL continuation
+
+Paused Agent, Team, and Workflow runs are persisted in SQLite and displayed as a card. Confirmation requirements expose approve/reject buttons; other requirements can be resolved with:
+
+```text
+/approve [requirement_id]
+/reject [requirement_id] optional note
+/input field=value
+/feedback question=choice
+/external execution result
+/continue value
+```
+
+Continuation preserves the original `session_id`, `user_id`, and Bearer token. Shared group sessions still allow only the original requester to resolve a paused run. `/new` invalidates pending HITL actions for the current scope.
+
 ## State database and troubleshooting
 
-The default database `.data/agno-feishu.sqlite3` uses WAL and a busy timeout. It contains `schema_version`, `dedup_messages`, `session_scopes`, and `runs`. Message deduplication defaults to 24 hours and run records are retained for 7 days.
+The default database `.data/agno-feishu.sqlite3` uses WAL and a busy timeout. It contains `schema_version`, `dedup_messages`, `session_scopes`, `runs`, and `hitl_requirements`. Message deduplication defaults to 24 hours and run/HITL records are retained for 7 days.
 
 If no messages arrive, check application publication, WebSocket subscriptions, bot membership, and allowlists. For 401/403 responses, check the AgentOS token, target ID, and AgentOS authorization. For resource failures, check Lark/Feishu resource-read permissions. Logs do not include the App Secret, AgentOS token, raw file contents, or complete user messages.
 

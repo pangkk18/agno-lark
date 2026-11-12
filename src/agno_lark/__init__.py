@@ -3,6 +3,16 @@
 from .app import create_app
 from .bridge import FeishuBridge, LarkBridge
 from .config import FeishuSettings, LarkSettings, load_settings
+from .data import (
+    BaseRecordListResult,
+    BaseTableListResult,
+    LarkBaseTools,
+    LarkDataClient,
+    LarkDataTools,
+    LarkSheetsTools,
+    SheetReadResult,
+    build_lark_data_client,
+)
 from .interface import FeishuInterface, LarkInterface
 from .session import make_scope_key, make_session_id
 from .state import RunRecord, SqliteStateStore
@@ -23,6 +33,14 @@ __all__ = [
     "load_settings",
     "make_scope_key",
     "make_session_id",
+    "LarkDataClient",
+    "LarkSheetsTools",
+    "LarkBaseTools",
+    "LarkDataTools",
+    "SheetReadResult",
+    "BaseTableListResult",
+    "BaseRecordListResult",
+    "build_lark_data_client",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"

@@ -30,8 +30,10 @@ flowchart LR
 - 流式卡片回复，显示运行状态、运行 ID、耗时和取消按钮。
 - `/new`、`/status`、`/cancel [run_id]`、`/help` 命令。
 - 用户和聊天白名单、自动重连、异常处理和结构化日志。
+- 只读 Lark/Feishu 电子表格范围和多维表格记录，可作为 AgentOS 工具或桥接命令使用。
+- 支持 Agent、Team、Workflow 的 HITL 确认、拒绝、输入、反馈、外部执行和继续运行。
 
-首版不处理音频、视频、语音或 HITL 继续审批流程；长任务使用前台 SSE 流式运行。
+桥接器不处理音频、视频或语音。数据能力严格只读，默认使用机器人 tenant access token。
 
 ## 安装
 
@@ -86,6 +88,11 @@ FEISHU_ALLOWED_USER_IDS=
 FEISHU_ALLOWED_CHAT_IDS=
 # user（默认：每个成员独立上下文）或 shared（群聊 / 线程共享上下文）
 FEISHU_GROUP_SESSION_MODE=user
+LARK_API_BASE_URL=https://open.feishu.cn
+LARK_API_TIMEOUT=20
+LARK_DATA_MAX_ROWS=100
+LARK_DATA_MAX_CELLS=2000
+LARK_BASE_PAGE_SIZE=50
 BRIDGE_HOST=127.0.0.1
 BRIDGE_PORT=7788
 ```
@@ -142,9 +149,49 @@ app = agent_os.get_app()
 
 取消先写入 `cancel_requested`，再调用 AgentOS scoped cancel endpoint；最终状态以 SSE 终态事件为准。卡片按钮会校验操作者和聊天白名单。
 
+## 读取电子表格和多维表格
+
+在 Lark/Feishu 开放平台为应用开通 Sheets 和 Base/Bitable 的只读权限，并确保机器人可以访问目标资源。本版本默认使用应用的 tenant access token，不实现 OAuth 用户 Token。
+
+```text
+/sheet https://open.feishu.cn/sheets/shtxxxxxxxx Sheet1!A1:D20
+/base https://open.feishu.cn/base/appxxxxxxxx tblxxxxxxxx
+/base appxxxxxxxx tblxxxxxxxx keyword
+```
+
+URL 可以替换为原始 spreadsheet/app token；Sheet 必须提供范围，Base 必须提供 `table_id`。结果以有上限的卡片返回，不回显 Token，也不提供写入、删除、授权或 Wiki URL 操作。
+
+嵌入本地 AgentOS 时注册工具：
+
+```python
+from agno.agent import Agent
+from agno_lark import LarkBaseTools, LarkSheetsTools, build_lark_data_client, load_settings
+
+settings = load_settings()
+data = build_lark_data_client(settings)
+agent = Agent(tools=[LarkSheetsTools(data), LarkBaseTools(data)])
+```
+
+独立运行的远程 AgentOS 无法动态注入工具，因此使用 `/sheet` 和 `/base` 命令。
+
+## HITL 继续执行
+
+Agent、Team 或 Workflow 暂停时，桥接器把要求保存到 SQLite，并发送暂停卡片。确认要求可点击批准/拒绝；其他要求可以使用：
+
+```text
+/approve [requirement_id]
+/reject [requirement_id] 可选说明
+/input field=value
+/feedback question=choice
+/external 执行结果
+/continue value
+```
+
+继续请求保留原始 `session_id`、`user_id` 和 Bearer Token。共享群聊上下文时，仍然只有原始发起者可以处理对应 HITL；`/new` 会使当前 scope 的旧卡片失效。
+
 ## 状态数据库和排查
 
-默认数据库 `.data/agno-feishu.sqlite3` 启用 WAL 和 busy timeout，包含 `schema_version`、`dedup_messages`、`session_scopes` 和 `runs`；去重默认 24 小时，运行记录默认保留 7 天。该文件名保留 `agno-feishu` 以兼容已有状态数据。没有消息时检查应用发布、WebSocket 订阅、机器人群成员资格和白名单；401/403 时检查 Token、目标 ID 和 AgentOS 鉴权；资源失败时检查 Lark/Feishu 资源读取权限。日志不会输出 App Secret、AgentOS Token、原始文件内容或完整用户消息。
+默认数据库 `.data/agno-feishu.sqlite3` 启用 WAL 和 busy timeout，包含 `schema_version`、`dedup_messages`、`session_scopes`、`runs` 和 `hitl_requirements`；去重默认 24 小时，运行及 HITL 记录默认保留 7 天。该文件名保留 `agno-feishu` 以兼容已有状态数据。没有消息时检查应用发布、WebSocket 订阅、机器人群成员资格和白名单；401/403 时检查 Token、目标 ID 和 AgentOS 鉴权；资源失败时检查 Lark/Feishu 资源读取权限。日志不会输出 App Secret、AgentOS Token、原始文件内容或完整用户消息。
 
 如果终端设置了 SOCKS 代理，而当前环境没有安装 `socksio`，本地验证时请设置 `NO_PROXY=127.0.0.1,localhost`（以及 AgentOS 主机名）。如果 AgentOS 必须通过 SOCKS 代理访问，请在部署环境安装 HTTPX SOCKS 扩展：`uv pip install "httpx[socks]>=0.28,<1"`。
 

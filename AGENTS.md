@@ -30,4 +30,6 @@ Agno remote targets support `agent`, `team`, and `workflow`. Cancellation must p
 
 The first release supports WebSocket long connections, text/image/file messages, and foreground SSE streaming. Group session behavior is controlled by `FEISHU_GROUP_SESSION_MODE`: `user` (the default) isolates context per member, while `shared` shares context per chat/thread. Update the session tests and both README files when changing this mapping.
 
+Read-only Sheets and Base/Bitable access lives in `agno_lark.data` and uses the bot tenant token. Keep `/sheet` and `/base` bounded and read-only. HITL requirements are persisted in SQLite and resumed through the target-specific AgentOS continuation API; preserve the original requester, scope, session ID, and authorization for card callbacks and text commands.
+
 The `FEISHU_*` environment variable names and `/feishu/status` route are compatibility surfaces. The canonical public names are `agno-lark`, `agno_lark`, `LarkInterface`, `LarkBridge`, and `LarkSettings`; `FeishuInterface`, `FeishuBridge`, and `FeishuSettings` remain aliases for existing integrations.
