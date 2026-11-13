@@ -231,6 +231,33 @@ class SqliteStateStore:
         )
         return [dict(row) for row in await cur.fetchall()]
 
+    async def get_run(self, scope_key: str, run_id: str) -> dict[str, Any] | None:
+        db = await self._conn()
+        cur = await db.execute(
+            "SELECT * FROM runs WHERE scope_key = ? AND run_id = ? "
+            "ORDER BY started_at DESC LIMIT 1",
+            (scope_key, run_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def find_card_run(
+        self, run_id: str, *, chat_id: str, target_type: str, target_id: str
+    ) -> dict[str, Any] | None:
+        """Recover callback context, bounded to the source chat and bridge target.
+
+        The caller must still authorize the operator against the returned scope.
+        Ambiguous run IDs fail closed instead of selecting another conversation.
+        """
+        db = await self._conn()
+        cur = await db.execute(
+            "SELECT * FROM runs WHERE run_id = ? AND chat_id = ? "
+            "AND target_type = ? AND target_id = ? ORDER BY started_at DESC LIMIT 2",
+            (run_id, chat_id, target_type, target_id),
+        )
+        rows = list(await cur.fetchall())
+        return dict(rows[0]) if len(rows) == 1 else None
+
     async def save_hitl_requirement(
         self,
         record: HitlRequirementRecord | Any,

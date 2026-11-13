@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -215,27 +216,41 @@ class LarkBridge:
             await self._handle_data_command(command, args, msg)
         elif command == "/status":
             run = self.active.get(scope)
+            if args and (run is None or run.run_id != args[0]):
+                run = None
             persisted = []
-            if hasattr(self.store, "active_runs"):
+            if args and hasattr(self.store, "get_run"):
+                record = await self.store.get_run(scope, args[0])
+                persisted = [record] if record else []
+            elif hasattr(self.store, "active_runs"):
                 persisted = await self.store.active_runs(scope)
-            output = (
-                f"运行中：{run.run_id or '准备中'}"
-                if run
-                else (
-                    f"运行中：{persisted[0].get('run_id') or '准备中'}"
-                    if persisted
-                    else "当前没有活动运行"
-                )
+                if args:
+                    persisted = [item for item in persisted if item.get("run_id") == args[0]]
+            status = "running" if run else (
+                persisted[0]["status"] if persisted else ("unknown" if args else "idle")
+            )
+            output = "" if (run or persisted) else (
+                "未找到此运行的持久化记录，无法确认状态" if args else "当前没有活动运行"
             )
             active_run_id = (
-                run.run_id if run else (persisted[0].get("run_id") if persisted else None)
+                run.run_id if run else (
+                    persisted[0].get("run_id") if persisted else (args[0] if args else None)
+                )
             )
+            requirements = []
+            if status == "paused" and hasattr(self.store, "list_hitl_requirements"):
+                requirements = [
+                    item["requirement_id"]
+                    for item in await self.store.list_hitl_requirements(scope)
+                    if item.get("run_id") == active_run_id and item.get("status") == "pending"
+                ]
             await self._send(
                 msg,
                 run_card(
-                    status="running" if (run or persisted) else "completed",
+                    status=status,
                     output=output,
                     run_id=active_run_id,
+                    requirement_ids=requirements,
                 ),
             )
         elif command == "/cancel":
@@ -469,7 +484,15 @@ class LarkBridge:
             else []
         )
         pending = [row for row in rows if row.get("status") == "pending"]
-        if args:
+        card_run_id = getattr(msg, "card_run_id", None)
+        if card_run_id:
+            requirement_id = getattr(msg, "card_requirement_id", None)
+            pending = [
+                row for row in pending
+                if row.get("run_id") == card_run_id
+                and (not requirement_id or row.get("requirement_id") == requirement_id)
+            ]
+        elif args:
             selected = [
                 row
                 for row in pending
@@ -477,7 +500,7 @@ class LarkBridge:
             ]
             pending = selected or pending
         if not pending:
-            await self._send(msg, run_card(status="completed", output="没有待处理的审批"))
+            await self._send(msg, run_card(status="unknown", output="没有匹配的待处理审批"))
             return
         row = pending[0]
         try:
@@ -488,7 +511,7 @@ class LarkBridge:
             )
             requester = row.get("requester_user_id")
             actor = getattr(getattr(msg, "sender", None), "open_id", None)
-            if requester and actor and requester != actor:
+            if requester and requester != actor:
                 await self._send(
                     msg,
                     run_card(
@@ -501,6 +524,10 @@ class LarkBridge:
             continuation_session = str(row.get("session_id") or session_id)
             if row.get("target_type") and row["target_type"] != getattr(
                 self.settings, "target_type", "agent"
+            ):
+                raise ValueError("target mismatch")
+            if row.get("target_id") and row["target_id"] != getattr(
+                self.settings, "target_id", "target"
             ):
                 raise ValueError("target mismatch")
             is_workflow = row.get("requirement_kind") == "workflow" or "step_id" in payload
@@ -545,6 +572,23 @@ class LarkBridge:
                 elif command in {"/external", "/continue"} and requirement.needs_external_execution:
                     requirement.set_external_execution_result(" ".join(action_args))
                 requirements = [requirement]
+            original_card = getattr(msg, "card_message_id", None)
+            if original_card and callable(getattr(self.channel, "update_card", None)):
+                # Only an authorized, exactly matched continuation may replace
+                # the source card. Rejected operators must not erase its buttons.
+                msg._update_card_id = original_card
+                updated = await self._send(
+                    msg, run_card(status="running", run_id=row["run_id"], output="继续执行中")
+                )
+                if not updated:
+                    # Do not execute an approval when its source card could
+                    # not be retired; leave it pending for an explicit retry.
+                    del msg._update_card_id
+                    await self._send(
+                        msg, run_card(status="failed", run_id=row["run_id"],
+                                      output="更新原审批卡失败，尚未继续执行，请重试")
+                    )
+                    return
             if hasattr(self.store, "update_run"):
                 if hasattr(self.store, "update_run_by_id"):
                     await self.store.update_run_by_id(scope, row["run_id"], status="continuing")
@@ -716,7 +760,13 @@ class LarkBridge:
                 )
 
             stream = getattr(self.channel, "stream", None)
-            if callable(stream):
+            if getattr(msg, "_update_card_id", None):
+                async def update_original(card: dict[str, Any]) -> None:
+                    await self._send(msg, card)
+
+                await consume(update_original)
+                await self._send(msg, await finish())
+            elif callable(stream):
 
                 async def producer(controller: Any) -> None:
                     try:
@@ -765,6 +815,11 @@ class LarkBridge:
         except Exception as exc:
             self.last_error = f"HITL continuation failed: {type(exc).__name__}"
             log.debug("HITL continuation failed", exc_info=True)
+            if hasattr(self.store, "update_run_by_id"):
+                await self.store.update_run_by_id(
+                    scope, row["run_id"], status="failed", finished_at=time.time(),
+                    error=type(exc).__name__,
+                )
             await self._send(
                 msg, run_card(status="failed", run_id=row.get("run_id"), output="继续运行失败")
             )
@@ -1050,40 +1105,86 @@ class LarkBridge:
     async def handle_card_action(self, event: Any) -> None:
         data = getattr(event, "action", None) or getattr(event, "value", None) or {}
         data = getattr(data, "value", data)
-        if isinstance(data, str):
+        if not isinstance(data, dict):
             return
         action = data.get("action")
         if isinstance(action, str) and action.startswith("hitl:"):
             action = action.split(":", 1)[1]
-        msg = getattr(event, "message", None) or event
+        source = getattr(event, "message", None) or event
+        operator = getattr(event, "operator", None) or getattr(source, "sender", None)
+        conversation = getattr(source, "conversation", None)
+        chat_id = getattr(event, "chat_id", None) or getattr(conversation, "chat_id", None)
+        # SDK callbacks have an operator/chat/message ID but no conversation.
+        # Never use the bot who sent the card as the continuation requester.
+        msg = SimpleNamespace(
+            sender=operator,
+            chat_id=chat_id,
+            conversation=conversation,
+            card_message_id=getattr(event, "message_id", None),
+            card_run_id=data.get("run_id"),
+            card_requirement_id=data.get("requirement_id"),
+        )
         if not self._allowed(msg):
             return
+        actor = getattr(operator, "open_id", None)
+        if not actor:
+            return
         scope, session = await self._scope(msg)
+        run_id = data.get("run_id")
+        if run_id and hasattr(self.store, "find_card_run"):
+            record = await self.store.find_card_run(
+                run_id,
+                chat_id=chat_id,
+                target_type=getattr(self.settings, "target_type", "agent"),
+                target_id=getattr(self.settings, "target_id", "target"),
+            )
+            if record:
+                base = make_scope_key(
+                    record["target_type"], record["target_id"], record["chat_id"],
+                    record.get("thread_id"),
+                )
+                if record["scope_key"] not in {base, f"{base}:user:{actor}"}:
+                    await self._send(msg, run_card(status="failed", output="无权访问此运行"))
+                    return
+                scope, session = record["scope_key"], record["session_id"]
+            else:
+                await self._send(
+                    msg, run_card(status="unknown", run_id=run_id, output="未找到可访问的运行记录")
+                )
+                return
         if action == "status":
-            await self.handle_command("/status", msg, scope, session)
+            await self.handle_command(
+                f"/status {run_id}" if run_id else "/status", msg, scope, session
+            )
         elif action == "cancel":
             run_id = data.get("run_id")
             await self.handle_command(
                 f"/cancel {run_id}" if run_id else "/cancel", msg, scope, session
             )
         elif action in {"approve", "reject", "continue"}:
-            run_id = data.get("run_id")
             requirement_id = data.get("requirement_id")
-            command_args = " ".join(
-                str(item) for item in (requirement_id, run_id) if item
-            )
-            await self.handle_command(
-                f"/{action} {command_args}" if command_args else f"/{action}",
-                msg,
-                scope,
-                session,
-            )
+            selector = requirement_id or run_id
+            # Serialize repeated clicks before reading pending state, so only
+            # one callback can resume this scope's requirement at a time.
+            async with self._locks.setdefault(scope, asyncio.Lock()):
+                await self.handle_command(
+                    f"/{action} {selector}" if selector else f"/{action}",
+                    msg, scope, session,
+                )
 
-    async def _send(self, msg: Any, card: dict[str, Any]) -> None:
+    async def _send(self, msg: Any, card: dict[str, Any]) -> bool:
         to = getattr(getattr(msg, "conversation", None), "chat_id", None) or getattr(
             msg, "chat_id", None
         )
         try:
+            original_card = getattr(msg, "_update_card_id", None)
+            if original_card:
+                result = self.channel.update_card(original_card, card)
+                if inspect.isawaitable(result):
+                    result = await result
+                if getattr(result, "success", True) is False:
+                    raise RuntimeError("original card update failed")
+                return True
             # FeishuChannel.send accepts an outbound envelope.  ``card`` is
             # the schema-2.0 card document itself and must be nested under the
             # SDK's ``card`` key; passing the document directly makes the
@@ -1091,8 +1192,10 @@ class LarkBridge:
             result = self.channel.send(to, {"card": card})
             if inspect.isawaitable(result):
                 await result
+            return True
         except Exception as exc:
             self.last_error = str(exc)
+            return False
 
     def status(self) -> dict[str, Any]:
         connected = getattr(self.channel, "connected", None)

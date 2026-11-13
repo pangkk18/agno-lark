@@ -20,6 +20,10 @@ def run_card(
         "cancelled": "已取消",
         "failed": "失败",
         "paused": "已暂停",
+        "continuing": "继续执行中",
+        "cancel_requested": "取消请求中",
+        "unknown": "未知",
+        "idle": "无活动运行",
     }.get(status, status)
     lines = [f"状态：{title}"]
     if run_id:
@@ -39,7 +43,7 @@ def run_card(
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": "查看状态"},
                     "type": "primary",
-                    "value": {"action": "status"},
+                    "value": {"action": "status", "run_id": run_id or ""},
                 },
                 {
                     "tag": "button",

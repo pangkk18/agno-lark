@@ -230,6 +230,12 @@ Agent、Team 或 Workflow 暂停时，桥接器把要求保存到 SQLite，并�
 
 继续请求保留原始 `session_id`、`user_id` 和 Bearer Token。共享群聊上下文时，仍然只有原始发起者可以处理对应 HITL；`/new` 会使当前 scope 的旧卡片失效。
 
+卡片回调按持久化运行记录恢复原始 scope 和话题线程，不再根据缺少群聊信息的回调推算范围。
+通过授权校验的批准/拒绝操作会原位更新原审批卡：继续执行时移除审批按钮，最终结果仍更新到同一张卡；
+若再次暂停，则展示新的审批要求。首次更新原卡失败时，审批保持待处理，不会继续执行。
+“查看状态”按钮携带运行 ID，按该 ID 查询持久化状态，桥接器重启后也能识别暂停的任务。
+找不到记录时显示状态未知，不视为已完成；文本命令也支持 `/status <run_id>`。
+
 ## 状态数据库和排查
 
 默认数据库 `.data/agno-feishu.sqlite3` 启用 WAL 和 busy timeout，包含 `schema_version`、`dedup_messages`、`session_scopes`、`runs` 和 `hitl_requirements`；去重默认 24 小时，运行及 HITL 记录默认保留 7 天。该文件名保留 `agno-feishu` 以兼容已有状态数据。没有消息时检查应用发布、WebSocket 订阅、机器人群成员资格和白名单；401/403 时检查 Token、目标 ID 和 AgentOS 鉴权；资源失败时检查 Lark/Feishu 资源读取权限。日志不会输出 App Secret、AgentOS Token、原始文件内容或完整用户消息。

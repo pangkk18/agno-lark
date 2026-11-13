@@ -150,7 +150,7 @@ app = agent_os.get_app()
 | Command | Behavior |
 | --- | --- |
 | `/new` | Increment the current scope generation and start a fresh session. |
-| `/status` | Show active and recent runs for the current scope. |
+| `/status [run_id]` | Show the current scope's active run, or the persisted state of a specific run. |
 | `/cancel` | Cancel the most recent active run for the current scope. |
 | `/cancel <run_id>` | Request cancellation of a specific run. |
 | `/help` | Show the command help card. |
@@ -239,6 +239,14 @@ Paused Agent, Team, and Workflow runs are persisted in SQLite and displayed as a
 ```
 
 Continuation preserves the original `session_id`, `user_id`, and Bearer token. Shared group sessions still allow only the original requester to resolve a paused run. `/new` invalidates pending HITL actions for the current scope.
+
+Card callbacks restore the original scope and thread from the persisted run rather than
+inferring group context from the callback. An authorized approve/reject action updates
+the original card in place: its approval buttons are removed while continuing, and the
+same card receives the final state (or new requirements if execution pauses again).
+If the initial card update fails, the approval remains pending and execution is not resumed.
+The status button carries the run ID and reads that run's persisted state, including
+after a bridge restart. A missing record is reported as unknown, not completed.
 
 ## State database and troubleshooting
 
